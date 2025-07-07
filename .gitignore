@@ -1,0 +1,32 @@
+
+
+# Environment
+env/
+venv/
+.env
+
+# Django
+*.log
+*.pot
+*.pyc
+__pycache__/
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Media files
+/media/
+
+# Static files
+/static/
+
+# Scraper output
+/mirror/
+/mirror_upgraded/
+*.zip
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
