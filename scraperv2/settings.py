@@ -23,11 +23,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-ifo6r!ml%0d=*__0^b5n-2%dt-p&=%bqap5w*a==-+b3h5l6c2'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
-ALLOWED_HOSTS = ['Veescraper.onrender.com']
+DEBUG = True
 
-
-STATIC_ROOT  = BASE_DIR / 'staticfiles'
+ALLOWED_HOSTS = ['Veescraper.onrender.com', 'localhost', ]
 
 
 # Application definition
