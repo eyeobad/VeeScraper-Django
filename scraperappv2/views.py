@@ -147,7 +147,7 @@ def download_zip(request: HttpRequest, filename: str) -> HttpResponse:
     if not filename.endswith('.zip') or '..' in filename or '/' in filename:
         return HttpResponseForbidden("Invalid filename")
     
-    # --- THIS IS THE ONLY CHANGE: Look for the zip file in the project's root directory ---
+    # Look for the zip file in the project's root directory
     zip_path = (Path(settings.BASE_DIR) / filename).resolve()
     
     # Security check to ensure the file is in the project root
