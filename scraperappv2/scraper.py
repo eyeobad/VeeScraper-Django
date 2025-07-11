@@ -12,18 +12,13 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 
-# SELENIUM SETUP 
+# PLAYWRIGHT SETUP 
 try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    SELENIUM_AVAILABLE = True
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
 except ImportError:
-    SELENIUM_AVAILABLE = False
-    logging.warning("Selenium not installed. Dynamic scraping will be disabled. To enable, run: pip install selenium")
+    PLAYWRIGHT_AVAILABLE = False
+    logging.warning("Playwright not installed. Dynamic scraping will be disabled. To enable, run: pip install playwright && playwright install chromium")
 
 # CONFIGURATION 
 CSS_URL_RE = re.compile(r"url\(\s*['\"]?(.*?)['\"]?\s*\)", re.IGNORECASE)
@@ -124,31 +119,32 @@ def convert_css_to_tailwind(css_content: str) -> dict | None:
     return call_gemini_api(payload)
 
 # --- SCRAPING & FILE HANDLING ---
-def setup_selenium_driver():
-    if not SELENIUM_AVAILABLE: return None
+def setup_playwright_browser():
+    if not PLAYWRIGHT_AVAILABLE: 
+        return None, None
     try:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
-        return webdriver.Chrome(options=chrome_options)
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=DEFAULT_USER_AGENT)
+        return browser, context
     except Exception as e:
-        logger.error(f"Failed to set up Selenium WebDriver. Error: {e}")
-        return None
+        logger.error(f"Failed to set up Playwright. Error: {e}")
+        return None, None
 
-def fetch_with_selenium(url: str, driver) -> str | None:
+def fetch_with_playwright(url: str, context) -> str | None:
     try:
-        driver.get(url)
-        WebDriverWait(driver, DYNAMIC_SCRAPE_TIMEOUT).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        page = context.new_page()
+        page.goto(url, timeout=DYNAMIC_SCRAPE_TIMEOUT * 1000)
+        page.wait_for_load_state("networkidle", timeout=DYNAMIC_SCRAPE_TIMEOUT * 1000)
         time.sleep(3)
-        return driver.page_source
+        content = page.content()
+        page.close()
+        return content
     except Exception as e:
-        logger.error(f"Selenium failed to fetch {url}: {e}")
+        logger.error(f"Playwright failed to fetch {url}: {e}")
         return None
 
-def fetch_static(session: requests.Session, url: str, driver):
+def fetch_static(session: requests.Session, url: str, context):
     try:
         time.sleep(REQUEST_DELAY)
         # REMOVED PROXY SETUP
@@ -185,16 +181,16 @@ def find_css_assets(css_text: str, css_url: str, base_url: str, root_dir: Path) 
             found_assets.add((asset_url, get_local_path(asset_url, root_dir, 'assets')))
     return found_assets
 
-def scrape_page(url: str, depth: int, base_url: str, root_dir: Path, session: requests.Session, driver, to_crawl: set, crawled_pages: set, assets_to_download: set):
+def scrape_page(url: str, depth: int, base_url: str, root_dir: Path, session: requests.Session, context, to_crawl: set, crawled_pages: set, assets_to_download: set):
     if url in crawled_pages or depth > DEFAULT_MAX_DEPTH: return
     crawled_pages.add(url)
     logger.info(f"Scraping page: {url} at depth {depth}")
 
-    content, content_type = fetch_static(session, url, driver)
+    content, content_type = fetch_static(session, url, context)
     
-    if driver and (not content or (content and 'text/html' in content_type and len(BeautifulSoup(content, "html.parser").body.get_text(strip=True)) < DYNAMIC_SCRAPE_THRESHOLD)):
-        logger.info(f"Static content for {url} is sparse or failed. Attempting dynamic scrape with Selenium.")
-        dynamic_content = fetch_with_selenium(url, driver)
+    if context and (not content or (content and 'text/html' in content_type and len(BeautifulSoup(content, "html.parser").body.get_text(strip=True)) < DYNAMIC_SCRAPE_THRESHOLD)):
+        logger.info(f"Static content for {url} is sparse or failed. Attempting dynamic scrape with Playwright.")
+        dynamic_content = fetch_with_playwright(url, context)
         if dynamic_content:
             content = dynamic_content.encode('utf-8')
             content_type = 'text/html'
@@ -276,7 +272,7 @@ def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: 
     session = requests.Session()
     session.headers.update({"User-Agent": user_agent})
     
-    driver = setup_selenium_driver()
+    browser, context = setup_playwright_browser()
 
     to_crawl, crawled_pages, assets_to_download = {base_url}, set(), set()
     
@@ -285,10 +281,12 @@ def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: 
         if not urls_to_process: break
         logger.info(f"--- Crawling depth {current_depth}: {len(urls_to_process)} pages ---")
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(scrape_page, url, current_depth, base_url, scrape_dir, session, driver, to_crawl, crawled_pages, assets_to_download) for url in urls_to_process]
+            futures = [executor.submit(scrape_page, url, current_depth, base_url, scrape_dir, session, context, to_crawl, crawled_pages, assets_to_download) for url in urls_to_process]
             for future in as_completed(futures): future.result()
 
-    if driver: driver.quit()
+    if browser:
+        context.close()
+        browser.close()
 
     logger.info(f"--- Downloading {len(assets_to_download)} assets ---")
     with ThreadPoolExecutor(max_workers=workers) as executor:
