@@ -2,6 +2,7 @@ import logging
 import json
 from pathlib import Path
 import mimetypes
+import os
 
 from django.shortcuts import render
 from django.contrib import messages
@@ -31,32 +32,46 @@ def index(request: HttpRequest) -> HttpResponse:
             return render(request, "scraperappv2/index.html")
         
         try:
-            # Call the main scraping function from your scraper
-            output_dir, zip_path = run_scrape_workflow(url)
+            # FIX: Get correct return values from scraper
+            file_list, zip_path = run_scrape_workflow(url)
             
-            # Store the unique output directory in the session for later use by converters
-            request.session['scrape_dir'] = output_dir
+            # Extract directory from first file path
+            if file_list:
+                # The scraper now correctly returns the list of files and the directory.
+                # We can get the directory from the first file's path.
+                # The scraper returns a path relative to the 'mirror_upgraded' folder.
+                # We need the full path to the unique scrape folder.
+                first_file_rel_path = Path(file_list[0]['path'])
+                scrape_dir_name = first_file_rel_path.parts[0]
+                scrape_dir_full_path = Path(settings.BASE_DIR) / "mirror_upgraded" / scrape_dir_name
+                
+                # Store the unique output directory in the session
+                request.session['scrape_dir'] = str(scrape_dir_full_path)
+            else:
+                request.session['scrape_dir'] = None
             
-            # Manually list the files from the output directory to display
-            output_dir_path = Path(output_dir)
-            files = [{"name": str(p.relative_to(output_dir_path)), "path": p.relative_to(output_dir_path).as_posix()} for p in sorted(output_dir_path.rglob("*")) if p.is_file()]
-
-            for file_info in files:
+            # Add URLs for each file
+            for file_info in file_list:
                 file_info['download_url'] = reverse('scraperappv2:scraper_download_file', kwargs={'filepath': file_info['path']})
                 if file_info['path'].endswith(('.html', '.htm')):
                     file_info['preview_url'] = reverse('scraperappv2:scraper_serve_file', kwargs={'filepath': file_info['path']})
 
             context = {
-                "files": files,
-                "zip_download_url": reverse('scraperappv2:scraper_download_zip', kwargs={'filename': Path(zip_path).name}),
-                "scrape_session_active": True # Flag to show conversion buttons
+                "files": file_list,
+                "zip_download_url": reverse('scraperappv2:scraper_download_zip', kwargs={'filename': os.path.basename(zip_path)}),
+                "scrape_session_active": bool(file_list) # Flag to show conversion buttons
             }
-            messages.success(request, f"Successfully scraped {len(files)} files. You can now perform AI conversions.")
+            
+            if file_list:
+                messages.success(request, f"Successfully scraped {len(file_list)} files. You can now perform AI conversions.")
+            else:
+                messages.warning(request, "Scrape completed but no files were found.")
+                
             return render(request, "scraperappv2/index.html", context)
 
         except Exception as e:
             logger.exception("An error occurred during scraping.")
-            messages.error(request, f"An unexpected error occurred: {e}")
+            messages.error(request, f"An unexpected error occurred: {str(e)}")
             return render(request, "scraperappv2/index.html")
 
     return render(request, "scraperappv2/index.html")
@@ -100,13 +115,12 @@ def trigger_conversion(request: HttpRequest) -> JsonResponse:
 # --- File Serving Views ---
 
 def serve_mirrored_file(request: HttpRequest, filepath: str) -> HttpResponse:
-    scrape_dir = request.session.get('scrape_dir')
-    if not scrape_dir:
-        raise Http404("No active scrape session. Please start a new scrape.")
-        
-    file_path = (Path(scrape_dir) / filepath).resolve()
+    # Use the base 'mirror_upgraded' directory for security checks
+    base_path = (Path(settings.BASE_DIR) / "mirror_upgraded").resolve()
+    file_path = (base_path / filepath).resolve()
 
-    if not str(file_path).startswith(str(Path(scrape_dir).resolve())):
+    # Security check
+    if not str(file_path).startswith(str(base_path)):
         return HttpResponseForbidden("Access Denied.")
     if not file_path.exists() or not file_path.is_file():
         raise Http404(f"File not found: {filepath}")
@@ -116,13 +130,11 @@ def serve_mirrored_file(request: HttpRequest, filepath: str) -> HttpResponse:
 
 
 def download_file(request: HttpRequest, filepath: str) -> HttpResponse:
-    scrape_dir = request.session.get('scrape_dir')
-    if not scrape_dir:
-        raise Http404("No active scrape session.")
+    base_path = (Path(settings.BASE_DIR) / "mirror_upgraded").resolve()
+    file_path = (base_path / filepath).resolve()
 
-    file_path = (Path(scrape_dir) / filepath).resolve()
-
-    if not str(file_path).startswith(str(Path(scrape_dir).resolve())):
+    # Security check
+    if not str(file_path).startswith(str(base_path)):
         return HttpResponseForbidden("Access Denied.")
     if not file_path.exists() or not file_path.is_file():
         raise Http404(f"File not found: {filepath}")
@@ -131,10 +143,15 @@ def download_file(request: HttpRequest, filepath: str) -> HttpResponse:
 
 
 def download_zip(request: HttpRequest, filename: str) -> HttpResponse:
-    zip_path = (Path(settings.BASE_DIR) / "mirror_upgraded" / filename).resolve()
+    # Validate filename format
+    if not filename.endswith('.zip') or '..' in filename or '/' in filename:
+        return HttpResponseForbidden("Invalid filename")
     
-    mirror_root = (Path(settings.BASE_DIR) / "mirror_upgraded").resolve()
-    if not str(zip_path.parent) == str(mirror_root) or not filename.endswith('.zip'):
+    # --- THIS IS THE ONLY CHANGE: Look for the zip file in the project's root directory ---
+    zip_path = (Path(settings.BASE_DIR) / filename).resolve()
+    
+    # Security check to ensure the file is in the project root
+    if not str(zip_path.parent) == str(Path(settings.BASE_DIR).resolve()):
          return HttpResponseForbidden("Access Denied.")
 
     if not zip_path.exists() or not zip_path.is_file():

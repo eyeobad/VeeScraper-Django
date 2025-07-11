@@ -34,7 +34,9 @@ REQUEST_DELAY = 0.1
 REQUEST_TIMEOUT = 20
 DYNAMIC_SCRAPE_TIMEOUT = 30
 DYNAMIC_SCRAPE_THRESHOLD = 500
-OUTPUT_DIR = Path("mirror_upgraded")
+# --- FIX: This reliably finds the project's root directory and sets the output folder there. ---
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = PROJECT_ROOT / "mirror_upgraded"
 lock = threading.Lock()
 
 # LOGGING SETUP 
@@ -128,11 +130,12 @@ def setup_selenium_driver():
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
-        service = Service() 
-        return webdriver.Chrome(service=service, options=chrome_options)
+        return webdriver.Chrome(options=chrome_options)
     except Exception as e:
-        logger.error(f"Failed to set up Selenium WebDriver. Make sure chromedriver is in your PATH. Error: {e}")
+        logger.error(f"Failed to set up Selenium WebDriver. Error: {e}")
         return None
 
 def fetch_with_selenium(url: str, driver) -> str | None:
@@ -145,9 +148,10 @@ def fetch_with_selenium(url: str, driver) -> str | None:
         logger.error(f"Selenium failed to fetch {url}: {e}")
         return None
 
-def fetch_static(session: requests.Session, url: str):
+def fetch_static(session: requests.Session, url: str, driver):
     try:
         time.sleep(REQUEST_DELAY)
+        # REMOVED PROXY SETUP
         resp = session.get(url, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         return resp.content, resp.headers.get("Content-Type", "").split(';')[0]
@@ -158,9 +162,13 @@ def fetch_static(session: requests.Session, url: str):
 def get_local_path(url: str, base_dir: Path, subdir: str) -> Path:
     parsed = urlparse(url)
     path = parsed.netloc + parsed.path
-    if path.endswith('/'): path += 'index.html'
-    if url.rstrip('/') == f"{parsed.scheme}://{parsed.netloc}": path = parsed.netloc + '/index.html'
-    path = re.sub(r'[<>:"/\\|?*]', '_', path)
+    if path.endswith('/'): 
+        path += 'index.html'
+    if url.rstrip('/') == f"{parsed.scheme}://{parsed.netloc}": 
+        path = parsed.netloc + '/index.html'
+    
+    # FIX: Preserve directory structure by only replacing illegal characters
+    path = re.sub(r'[<>:"|?*]', '_', path) # Keep slashes
     return base_dir / subdir / Path(path)
 
 def save_content(path: Path, data: bytes):
@@ -182,10 +190,10 @@ def scrape_page(url: str, depth: int, base_url: str, root_dir: Path, session: re
     crawled_pages.add(url)
     logger.info(f"Scraping page: {url} at depth {depth}")
 
-    content, content_type = fetch_static(session, url)
+    content, content_type = fetch_static(session, url, driver)
     
     if driver and (not content or (content and 'text/html' in content_type and len(BeautifulSoup(content, "html.parser").body.get_text(strip=True)) < DYNAMIC_SCRAPE_THRESHOLD)):
-        logger.info(f"Static content for {url} is sparse. Attempting dynamic scrape.")
+        logger.info(f"Static content for {url} is sparse or failed. Attempting dynamic scrape with Selenium.")
         dynamic_content = fetch_with_selenium(url, driver)
         if dynamic_content:
             content = dynamic_content.encode('utf-8')
@@ -217,7 +225,7 @@ def scrape_page(url: str, depth: int, base_url: str, root_dir: Path, session: re
             assets_to_download.add((asset_url, asset_local_path))
             
             if asset_subdir == 'css':
-                css_content, _ = fetch_static(session, asset_url)
+                css_content, _ = fetch_static(session, asset_url, None)
                 if css_content:
                     assets_to_download.update(find_css_assets(css_content.decode('utf-8', 'ignore'), asset_url, base_url, root_dir))
         
@@ -229,8 +237,7 @@ def scrape_page(url: str, depth: int, base_url: str, root_dir: Path, session: re
 
     save_content(page_local_path, soup.encode("utf-8"))
 
-def create_zip_from_directory(source_dir: Path, zip_filename: str) -> str:
-    zip_path = source_dir.parent / zip_filename
+def create_zip_from_directory(source_dir: Path, zip_path: Path) -> str:
     logger.info(f"Creating archive: {zip_path}")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(source_dir.rglob("*")):
@@ -253,14 +260,18 @@ def decompose_html(soup: BeautifulSoup) -> dict:
         decomposed["page_specific_content"] = str(soup.body)
     return decomposed
 
-# MAIN WORKFLOW FUNCTIONS 
+# --- MAIN WORKFLOW FUNCTIONS ---
 
+# FIX: Renamed function to match the import in views.py
 def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: int = DEFAULT_MAX_WORKERS, output: str = None, user_agent: str = DEFAULT_USER_AGENT):
     base_url = base_url.rstrip("/")
     scrape_id = f"{urlparse(base_url).netloc}_{int(time.time())}"
-    output_dir = Path(output or OUTPUT_DIR) / scrape_id
-    if output_dir.exists(): shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True)
+    
+    output_dir = Path(output or OUTPUT_DIR)
+    output_dir.mkdir(exist_ok=True)
+    scrape_dir = output_dir / scrape_id
+    if scrape_dir.exists(): shutil.rmtree(scrape_dir)
+    scrape_dir.mkdir(parents=True)
 
     session = requests.Session()
     session.headers.update({"User-Agent": user_agent})
@@ -274,21 +285,35 @@ def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: 
         if not urls_to_process: break
         logger.info(f"--- Crawling depth {current_depth}: {len(urls_to_process)} pages ---")
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(scrape_page, url, current_depth, base_url, output_dir, session, driver, to_crawl, crawled_pages, assets_to_download) for url in urls_to_process]
+            futures = [executor.submit(scrape_page, url, current_depth, base_url, scrape_dir, session, driver, to_crawl, crawled_pages, assets_to_download) for url in urls_to_process]
             for future in as_completed(futures): future.result()
 
     if driver: driver.quit()
 
     logger.info(f"--- Downloading {len(assets_to_download)} assets ---")
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(fetch_static, session, url): path for url, path in assets_to_download}
+        future_map = {executor.submit(fetch_static, session, url, None): path for url, path in assets_to_download}
         for future in as_completed(future_map):
             content, _ = future.result()
             if content: save_content(future_map[future], content)
 
-    zip_path = create_zip_from_directory(output_dir, f"{urlparse(base_url).netloc}_scraped.zip")
+    # --- FIX: Generate proper relative paths ---
+    file_list = [
+        {
+            "name": p.name,
+            "path": str(p.relative_to(output_dir))
+        } 
+        for p in sorted(scrape_dir.rglob("*")) if p.is_file()
+    ]
+
+    # --- FIX: Save the zip file to the project root where the view expects it ---
+    zip_filename = f"{urlparse(base_url).netloc}_scraped.zip"
+    zip_path = output_dir.parent / zip_filename
+    create_zip_from_directory(scrape_dir, zip_path)
+    
     logger.info(f"Scraping complete. Zipped content at: {zip_path}")
-    return str(output_dir), zip_path
+    # --- FIX: Return the file_list and zip_path as expected by the view ---
+    return file_list, str(zip_path)
 
 def run_tailwind_conversion(source_dir_str: str):
     source_dir = Path(source_dir_str)
@@ -301,7 +326,13 @@ def run_tailwind_conversion(source_dir_str: str):
         tailwind_result = convert_css_to_tailwind(file_path.read_text(encoding='utf-8', errors='ignore'))
         if tailwind_result and 'tailwind_classes' in tailwind_result:
             save_content(file_path.with_suffix('.tailwind.txt'), tailwind_result['tailwind_classes'].encode('utf-8'))
-    return create_zip_from_directory(target_dir, f"{project_name}.zip")
+    
+    # --- FIX: Save the zip file to the project root where the view expects it ---
+    zip_filename = f"{project_name}.zip"
+    zip_path = target_dir.parent / zip_filename
+    create_zip_from_directory(target_dir, zip_path)
+    
+    return str(zip_path)
 
 def run_react_conversion_workflow(source_dir_str: str):
     source_dir = Path(source_dir_str)
@@ -346,13 +377,11 @@ def run_react_conversion_workflow(source_dir_str: str):
             page_name = sanitize_name(Path(html_file_path.stem).name) or "Home"
             page_name += "Page"
             
-            # Process shared components first
             for comp_name, comp_html in decomposed_parts.get("shared_components", {}).items():
                 if comp_name not in shared_components:
                     react_result = convert_html_snippet_to_component(comp_html, css_contents, comp_name)
                     if react_result and 'react_component' in react_result:
                         component_body = react_result['react_component']
-                        #  FIX: Robustly strip incorrect function wrappers from AI output 
                         match = re.search(r"return\s*\(([\s\S]*)\);?\s*\}?", component_body, re.DOTALL)
                         if match: component_body = match.group(1).strip()
                         
@@ -362,7 +391,6 @@ def run_react_conversion_workflow(source_dir_str: str):
                         save_content(components_dir / f"{comp_name}.jsx", component_code.encode('utf-8'))
                         shared_components.add(comp_name)
 
-            # Process page-specific content
             page_html = decomposed_parts.get("page_specific_content")
             if page_html:
                 react_result = convert_html_snippet_to_component(page_html, css_contents, page_name)
@@ -391,7 +419,7 @@ def run_react_conversion_workflow(source_dir_str: str):
 
     app_imports = "import React from 'react';\nimport { BrowserRouter as Router, Routes, Route } from 'react-router-dom';\nimport MainLayout from './layouts/MainLayout';\n"
     app_imports += "\n".join([f"import {p['name']} from './pages/{p['name']}';" for p in page_info])
-    app_routes = "\n".join([f"          <Route path=\"{p['path']}\" element={{<{p['name']} />}} />" for p in page_info])
+    app_routes = "\n".join([f"        <Route path=\"{p['path']}\" element={{<{p['name']} />}} />" for p in page_info])
     
     app_js_content = f"{app_imports}\nimport './index.css';\n\nfunction App() {{\n  return (\n    <Router>\n      <Routes>\n        <Route element={{<MainLayout />}}>\n{app_routes}\n        </Route>\n      </Routes>\n    </Router>\n  );\n}}\n\nexport default App;\n"
     save_content(src_dir / 'App.js', app_js_content.encode('utf-8'))
@@ -402,4 +430,9 @@ def run_react_conversion_workflow(source_dir_str: str):
     if (source_dir / "images").exists(): shutil.copytree(source_dir / "images", public_dir / "images")
     if (source_dir / "assets").exists(): shutil.copytree(source_dir / "assets", public_dir / "assets")
 
-    return create_zip_from_directory(target_dir, f"{project_name}.zip")
+    # --- FIX: Save the zip file to the project root where the view expects it ---
+    zip_filename = f"{project_name}.zip"
+    zip_path = target_dir.parent / zip_filename
+    create_zip_from_directory(target_dir, zip_path)
+    
+    return str(zip_path)
