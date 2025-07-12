@@ -11,46 +11,29 @@ from django.http import FileResponse, Http404, HttpResponseForbidden, HttpReques
 from django.urls import reverse
 from django.views.decorators.http import require_POST
 from django.views.decorators.csrf import csrf_exempt
-from asgiref.sync import sync_to_async  # Added for async handling
 
 # Import the correct functions from your provided scraper file
 from .scraper import run_scrape_workflow, run_react_conversion_workflow, run_tailwind_conversion
 
 logger = logging.getLogger(__name__)
 
-# Create synchronous helper functions for session operations
-def sync_clear_session(session):
-    if 'scrape_dir' in session:
-        del session['scrape_dir']
-
-def sync_add_messages(request, level, message):
-    getattr(messages, level)(request, message)
-
-def sync_render(request, template, context=None):
-    return render(request, template, context or {})
-
-# Convert synchronous functions to async
-async_render = sync_to_async(sync_render, thread_sensitive=True)
-async_add_message = sync_to_async(sync_add_messages, thread_sensitive=True)
-async_clear_session = sync_to_async(sync_clear_session, thread_sensitive=True)
-
-async def index(request: HttpRequest) -> HttpResponse:
+def index(request: HttpRequest) -> HttpResponse:
     """
     Handles the main page logic. A POST request starts a new scrape,
     while a GET request clears the session for a fresh start.
     """
     if request.method == "GET" and 'scrape_dir' in request.session:
-        await async_clear_session(request.session)
+        del request.session['scrape_dir']
         
     if request.method == "POST":
         url = request.POST.get("url", "").strip()
         if not url.startswith(('http://', 'https://')):
-            await async_add_message(request, 'error', "Invalid URL. Please ensure it starts with http:// or https://")
-            return await async_render(request, "scraperappv2/index.html")
+            messages.error(request, "Invalid URL. Please ensure it starts with http:// or https://")
+            return render(request, "scraperappv2/index.html")
         
         try:
-            # Run scraping workflow (assuming this is synchronous)
-            file_list, zip_path = await sync_to_async(run_scrape_workflow, thread_sensitive=True)(url)
+            # FIX: Get correct return values from scraper
+            file_list, zip_path = run_scrape_workflow(url)
             
             # Extract directory from first file path
             if file_list:
@@ -58,9 +41,8 @@ async def index(request: HttpRequest) -> HttpResponse:
                 scrape_dir_name = first_file_rel_path.parts[0]
                 scrape_dir_full_path = Path(settings.BASE_DIR) / "mirror_upgraded" / scrape_dir_name
                 
-                # Store in session safely
+                # Store the unique output directory in the session
                 request.session['scrape_dir'] = str(scrape_dir_full_path)
-                await sync_to_async(request.session.save, thread_sensitive=True)()
             else:
                 request.session['scrape_dir'] = None
             
@@ -77,23 +59,23 @@ async def index(request: HttpRequest) -> HttpResponse:
             }
             
             if file_list:
-                await async_add_message(request, 'success', f"Successfully scraped {len(file_list)} files. You can now perform AI conversions.")
+                messages.success(request, f"Successfully scraped {len(file_list)} files. You can now perform AI conversions.")
             else:
-                await async_add_message(request, 'warning', "Scrape completed but no files were found.")
+                messages.warning(request, "Scrape completed but no files were found.")
                 
-            return await async_render(request, "scraperappv2/index.html", context)
+            return render(request, "scraperappv2/index.html", context)
 
         except Exception as e:
             logger.exception("An error occurred during scraping.")
-            await async_add_message(request, 'error', f"An unexpected error occurred: {str(e)}")
-            return await async_render(request, "scraperappv2/index.html")
+            messages.error(request, f"An unexpected error occurred: {str(e)}")
+            return render(request, "scraperappv2/index.html")
 
-    return await async_render(request, "scraperappv2/index.html")
+    return render(request, "scraperappv2/index.html")
 
 
 @require_POST
 @csrf_exempt
-async def trigger_conversion(request: HttpRequest) -> JsonResponse:
+def trigger_conversion(request: HttpRequest) -> JsonResponse:
     """
     Handles on-demand AI conversion requests sent from the front-end.
     """
@@ -106,9 +88,9 @@ async def trigger_conversion(request: HttpRequest) -> JsonResponse:
             return JsonResponse({'error': 'No active scrape session found. Please scrape a site first.'}, status=400)
 
         if conversion_type == 'react':
-            new_zip_path_str = await sync_to_async(run_react_conversion_workflow, thread_sensitive=True)(source_dir)
+            new_zip_path_str = run_react_conversion_workflow(source_dir)
         elif conversion_type == 'tailwind':
-            new_zip_path_str = await sync_to_async(run_tailwind_conversion, thread_sensitive=True)(source_dir)
+            new_zip_path_str = run_tailwind_conversion(source_dir)
         else:
             return JsonResponse({'error': 'Invalid conversion type.'}, status=400)
         
@@ -127,7 +109,6 @@ async def trigger_conversion(request: HttpRequest) -> JsonResponse:
 
 
 # --- File Serving Views ---
-# These remain synchronous as they don't use ORM
 
 def serve_mirrored_file(request: HttpRequest, filepath: str) -> HttpResponse:
     # Use the base 'mirror_upgraded' directory for security checks
