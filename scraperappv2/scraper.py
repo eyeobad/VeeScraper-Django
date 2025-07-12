@@ -125,7 +125,7 @@ def setup_playwright_browser():
     try:
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=DEFAULT_USER_AGENT)
+        context = browser.new_context(user_gent=DEFAULT_USER_AGENT)
         return browser, context
     except Exception as e:
         logger.error(f"Failed to set up Playwright. Error: {e}")
@@ -258,7 +258,6 @@ def decompose_html(soup: BeautifulSoup) -> dict:
 
 # --- MAIN WORKFLOW FUNCTIONS ---
 
-# FIX: Renamed function to match the import in views.py
 def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: int = DEFAULT_MAX_WORKERS, output: str = None, user_agent: str = DEFAULT_USER_AGENT):
     base_url = base_url.rstrip("/")
     scrape_id = f"{urlparse(base_url).netloc}_{int(time.time())}"
@@ -304,13 +303,12 @@ def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: 
         for p in sorted(scrape_dir.rglob("*")) if p.is_file()
     ]
 
-    # --- FIX: Save the zip file to the project root where the view expects it ---
+    # --- FIX: Save the zip file to the project root ---
     zip_filename = f"{urlparse(base_url).netloc}_scraped.zip"
-    zip_path = output_dir.parent / zip_filename
+    zip_path = PROJECT_ROOT / zip_filename  # Save directly in project root
     create_zip_from_directory(scrape_dir, zip_path)
     
     logger.info(f"Scraping complete. Zipped content at: {zip_path}")
-    # --- FIX: Return the file_list and zip_path as expected by the view ---
     return file_list, str(zip_path)
 
 def run_tailwind_conversion(source_dir_str: str):
@@ -325,9 +323,9 @@ def run_tailwind_conversion(source_dir_str: str):
         if tailwind_result and 'tailwind_classes' in tailwind_result:
             save_content(file_path.with_suffix('.tailwind.txt'), tailwind_result['tailwind_classes'].encode('utf-8'))
     
-    # --- FIX: Save the zip file to the project root where the view expects it ---
+    # --- FIX: Save the zip file to the project root ---
     zip_filename = f"{project_name}.zip"
-    zip_path = target_dir.parent / zip_filename
+    zip_path = PROJECT_ROOT / zip_filename  # Save directly in project root
     create_zip_from_directory(target_dir, zip_path)
     
     return str(zip_path)
@@ -428,9 +426,9 @@ def run_react_conversion_workflow(source_dir_str: str):
     if (source_dir / "images").exists(): shutil.copytree(source_dir / "images", public_dir / "images")
     if (source_dir / "assets").exists(): shutil.copytree(source_dir / "assets", public_dir / "assets")
 
-    # --- FIX: Save the zip file to the project root where the view expects it ---
+    # --- FIX: Save the zip file to the project root ---
     zip_filename = f"{project_name}.zip"
-    zip_path = target_dir.parent / zip_filename
+    zip_path = PROJECT_ROOT / zip_filename  # Save directly in project root
     create_zip_from_directory(target_dir, zip_path)
     
     return str(zip_path)
