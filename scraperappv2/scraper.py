@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import psutil  # Added for memory monitoring
 
 # PLAYWRIGHT SETUP 
 try:
@@ -46,25 +47,44 @@ logger = logging.getLogger(__name__)
 def call_gemini_api(payload: dict) -> dict | None:
     api_key = "AIzaSyBckkt1iIpN6sU7uNrD19wp8KNOYxu2qqQ"
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    try:
-        response = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=180)
-        response.raise_for_status()
-        data = response.json()
-        if 'candidates' in data and data['candidates']:
-            part = data['candidates'][0]['content']['parts'][0]
-            json_string = part.get('text', '')
-            if json_string.strip().startswith("```json"):
-                json_string = json_string.strip()[7:-3]
-            return json.loads(json_string)
-        logger.error(f"Unexpected API response format: {data}")
+    
+    # Memory check before API call
+    mem = psutil.virtual_memory()
+    if mem.percent > 90:  # Abort if memory is too high
+        logger.error("Memory usage too high (90%+), aborting API call")
         return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Gemini API request failed: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode JSON from Gemini API response: {e}")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during Gemini API call: {e}")
+        
+    for attempt in range(3):  # Retry up to 3 times
+        try:
+            response = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            if 'candidates' in data and data['candidates']:
+                part = data['candidates'][0]['content']['parts'][0]
+                json_string = part.get('text', '')
+                if json_string.strip().startswith("```json"):
+                    json_string = json_string.strip()[7:-3]
+                return json.loads(json_string)
+            logger.error(f"Unexpected API response format: {data}")
+        except requests.exceptions.Timeout:
+            logger.warning(f"API timeout (attempt {attempt+1}/3)")
+            time.sleep(5)  # Wait before retrying
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Gemini API request failed: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to decode JSON from Gemini API response: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during Gemini API call: {e}")
+        
+        # Wait before next attempt
+        time.sleep(2)
+        
     return None
+
+def log_memory_usage():
+    """Log current memory usage"""
+    mem = psutil.virtual_memory()
+    logger.info(f"Memory usage: {mem.used/(1024*1024):.2f}MB / {mem.total/(1024*1024):.2f}MB ({mem.percent}%)")
 
 def decompose_html_with_ai(html_content: str, css_content: str) -> dict | None:
     logger.info("Decomposing HTML into logical components with AI...")
@@ -258,7 +278,7 @@ def decompose_html(soup: BeautifulSoup) -> dict:
 
 # --- MAIN WORKFLOW FUNCTIONS ---
 
-# FIX: Renamed function to match the import in views.py
+
 def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: int = DEFAULT_MAX_WORKERS, output: str = None, user_agent: str = DEFAULT_USER_AGENT):
     base_url = base_url.rstrip("/")
     scrape_id = f"{urlparse(base_url).netloc}_{int(time.time())}"
@@ -339,98 +359,198 @@ def run_react_conversion_workflow(source_dir_str: str):
     if target_dir.exists(): shutil.rmtree(target_dir)
     
     logger.info(f"--- Generating Professional React Project: {project_name} ---")
+    log_memory_usage()
     
+    # Create directory structure
     src_dir, pages_dir, components_dir, layouts_dir, public_dir = target_dir / "src", target_dir / "src/pages", target_dir / "src/components", target_dir / "src/layouts", target_dir / "public"
     for d in [pages_dir, components_dir, layouts_dir, public_dir]: d.mkdir(parents=True, exist_ok=True)
 
-    package_json = {"name": project_name.lower().replace("_", "-"), "version": "0.1.0", "private": True, "dependencies": {"react": "^18.2.0", "react-dom": "^18.2.0", "react-router-dom": "^6.23.1", "react-scripts": "5.0.1"}, "scripts": {"start": "react-scripts start", "build": "react-scripts build"}, "devDependencies": {"tailwindcss": "^3.4.3"}, "eslintConfig": {"extends": ["react-app", "react-app/jest"]}, "browserslist": {"production": [">0.2%", "not dead", "not op_mini all"], "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]}}
+    # Create package.json
+    package_json = {
+        "name": project_name.lower().replace("_", "-"),
+        "version": "0.1.0",
+        "private": True,
+        "dependencies": {
+            "react": "^18.2.0",
+            "react-dom": "^18.2.0",
+            "react-router-dom": "^6.23.1",
+            "react-scripts": "5.0.1"
+        },
+        "scripts": {
+            "start": "react-scripts start",
+            "build": "react-scripts build"
+        },
+        "devDependencies": {
+            "tailwindcss": "^3.4.3"
+        },
+        "eslintConfig": {
+            "extends": ["react-app", "react-app/jest"]
+        },
+        "browserslist": {
+            "production": [">0.2%", "not dead", "not op_mini all"],
+            "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+        }
+    }
     save_content(target_dir / "package.json", json.dumps(package_json, indent=2).encode('utf-8'))
     
+    # Create Tailwind config
     tailwind_config = "/** @type {import('tailwindcss').Config} */\nmodule.exports = {\n  content: [\"./src/**/*.{js,jsx,ts,tsx}\"],\n  theme: {\n    extend: {},\n  },\n  plugins: [],\n}"
     save_content(target_dir / "tailwind.config.js", tailwind_config.encode('utf-8'))
     
+    # Create public files
     public_index_html = f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>{project_name}</title></head><body><div id="root"></div></body></html>'
     save_content(public_dir / 'index.html', public_index_html.encode('utf-8'))
     
+    # Create CSS files
     index_css_content = "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n"
     save_content(src_dir / 'index.css', index_css_content.encode('utf-8'))
 
+    # Process HTML files in chunks
     page_info = []
     shared_components = set()
     html_source_dir = source_dir / "html"
-
-    for html_file_path in sorted(list(html_source_dir.rglob("*.html"))):
-        try:
-            html_content = html_file_path.read_text(encoding='utf-8', errors='ignore')
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            css_contents = []
-            for link_tag in soup.find_all('link', rel='stylesheet', href=True):
-                css_file_path = (html_file_path.parent / Path(link_tag['href'])).resolve()
-                if css_file_path.exists(): css_contents.append(css_file_path.read_text(encoding='utf-8', errors='ignore'))
-            
-            decomposed_parts = decompose_html(soup)
-            if not decomposed_parts: continue
-
-            page_name = sanitize_name(Path(html_file_path.stem).name) or "Home"
-            page_name += "Page"
-            
-            for comp_name, comp_html in decomposed_parts.get("shared_components", {}).items():
-                if comp_name not in shared_components:
-                    react_result = convert_html_snippet_to_component(comp_html, css_contents, comp_name)
-                    if react_result and 'react_component' in react_result:
-                        component_body = react_result['react_component']
-                        match = re.search(r"return\s*\(([\s\S]*)\);?\s*\}?", component_body, re.DOTALL)
-                        if match: component_body = match.group(1).strip()
-                        
-                        imports = "import React from 'react';\n"
-                        if "<Link" in component_body: imports += "import { Link } from 'react-router-dom';\n"
-                        component_code = f"{imports}\nconst {comp_name} = () => {{\n  return (\n    {component_body}\n  );\n}};\n\nexport default {comp_name};\n"
-                        save_content(components_dir / f"{comp_name}.jsx", component_code.encode('utf-8'))
-                        shared_components.add(comp_name)
-
-            page_html = decomposed_parts.get("page_specific_content")
-            if page_html:
-                react_result = convert_html_snippet_to_component(page_html, css_contents, page_name)
-                if react_result and 'react_component' in react_result:
-                    imports = "import React"
-                    if "useState" in react_result['react_component']: imports += ", { useState }"
-                    imports += " from 'react';\n"
-                    if "<Link" in react_result['react_component']: imports += "import { Link } from 'react-router-dom';\n"
-                    
-                    component_body = react_result['react_component']
-                    match = re.search(r"return\s*\(([\s\S]*)\);?\s*\}?", component_body, re.DOTALL)
-                    if match: component_body = match.group(1).strip()
-
-                    component_code = f"{imports}\nconst {page_name} = () => {{\n  return (\n    <>\n      {component_body}\n    </>\n  );\n}};\n\nexport default {page_name};\n"
-                    save_content(pages_dir / f"{page_name}.jsx", component_code.encode('utf-8'))
-                    route_path = f"/{Path(html_file_path.stem).name}" if Path(html_file_path.stem).name.lower() != 'index' else '/'
-                    page_info.append({"name": page_name, "path": route_path, "displayName": page_name.replace("Page", "")})
-
-        except Exception as e:
-            logger.error(f"Could not process HTML file {html_file_path} for React conversion: {e}")
-
-    layout_imports = "\n".join([f"import {s} from '../components/{s}';" for s in shared_components])
-    layout_render = "\n".join([f"      <{s} />" for s in shared_components])
-    main_layout_content = f"import React from 'react';\nimport {{ Outlet }} from 'react-router-dom';\n{layout_imports}\n\nconst MainLayout = () => {{\n  return (\n    <>\n{layout_render}\n      <main><Outlet /></main>\n    </>\n  );\n}};\n\nexport default MainLayout;\n"
-    save_content(layouts_dir / 'MainLayout.jsx', main_layout_content.encode('utf-8'))
-
-    app_imports = "import React from 'react';\nimport { BrowserRouter as Router, Routes, Route } from 'react-router-dom';\nimport MainLayout from './layouts/MainLayout';\n"
-    app_imports += "\n".join([f"import {p['name']} from './pages/{p['name']}';" for p in page_info])
-    app_routes = "\n".join([f"        <Route path=\"{p['path']}\" element={{<{p['name']} />}} />" for p in page_info])
+    html_files = sorted(list(html_source_dir.rglob("*.html")))
+    chunk_size = 3  # Process 3 files at a time to manage memory
     
-    app_js_content = f"{app_imports}\nimport './index.css';\n\nfunction App() {{\n  return (\n    <Router>\n      <Routes>\n        <Route element={{<MainLayout />}}>\n{app_routes}\n        </Route>\n      </Routes>\n    </Router>\n  );\n}}\n\nexport default App;\n"
-    save_content(src_dir / 'App.js', app_js_content.encode('utf-8'))
+    logger.info(f"Processing {len(html_files)} HTML files in chunks of {chunk_size}")
+    
+    for i in range(0, len(html_files), chunk_size):
+        chunk_files = html_files[i:i+chunk_size]
+        logger.info(f"Processing chunk {i//chunk_size + 1}: {[f.name for f in chunk_files]}")
+        log_memory_usage()
+        
+        for html_file_path in chunk_files:
+            try:
+                html_content = html_file_path.read_text(encoding='utf-8', errors='ignore')
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Extract CSS content
+                css_contents = []
+                for link_tag in soup.find_all('link', rel='stylesheet', href=True):
+                    css_file_path = (html_file_path.parent / Path(link_tag['href'])).resolve()
+                    if css_file_path.exists():
+                        css_contents.append(css_file_path.read_text(encoding='utf-8', errors='ignore'))
+                
+                # Decompose HTML
+                decomposed_parts = decompose_html(soup)
+                if not decomposed_parts: continue
 
+                page_name = sanitize_name(Path(html_file_path.stem).name) or "Home"
+                page_name += "Page"
+                
+                # Process shared components
+                for comp_name, comp_html in decomposed_parts.get("shared_components", {}).items():
+                    if comp_name not in shared_components:
+                        logger.info(f"Converting shared component: {comp_name}")
+                        react_result = convert_html_snippet_to_component(comp_html, "\n".join(css_contents), comp_name)
+                        if react_result and 'react_component' in react_result:
+                            component_body = react_result['react_component']
+                            
+                            # Extract JSX return statement
+                            match = re.search(r"return\s*\(([\s\S]*)\);?\s*\}?", component_body, re.DOTALL)
+                            if match: 
+                                component_body = match.group(1).strip()
+                            
+                            # Add necessary imports
+                            imports = "import React from 'react';\n"
+                            if "<Link" in component_body: 
+                                imports += "import { Link } from 'react-router-dom';\n"
+                            
+                            # Format component code
+                            component_code = f"{imports}\nconst {comp_name} = () => {{\n  return (\n    {component_body}\n  );\n}};\n\nexport default {comp_name};\n"
+                            save_content(components_dir / f"{comp_name}.jsx", component_code.encode('utf-8'))
+                            shared_components.add(comp_name)
+                        else:
+                            logger.warning(f"Failed to convert component: {comp_name}")
+
+                # Process page content
+                page_html = decomposed_parts.get("page_specific_content")
+                if page_html:
+                    logger.info(f"Converting page: {page_name}")
+                    react_result = convert_html_snippet_to_component(page_html, "\n".join(css_contents), page_name)
+                    if react_result and 'react_component' in react_result:
+                        # Add necessary imports
+                        imports = "import React"
+                        if "useState" in react_result['react_component']: 
+                            imports += ", { useState }"
+                        imports += " from 'react';\n"
+                        
+                        if "<Link" in react_result['react_component']: 
+                            imports += "import { Link } from 'react-router-dom';\n"
+                        
+                        component_body = react_result['react_component']
+                        
+                        # Extract JSX return statement
+                        match = re.search(r"return\s*\(([\s\S]*)\);?\s*\}?", component_body, re.DOTALL)
+                        if match: 
+                            component_body = match.group(1).strip()
+
+                        # Format page component
+                        component_code = f"{imports}\nconst {page_name} = () => {{\n  return (\n    <>\n      {component_body}\n    </>\n  );\n}};\n\nexport default {page_name};\n"
+                        save_content(pages_dir / f"{page_name}.jsx", component_code.encode('utf-8'))
+                        
+                        # Create route path
+                        route_path = f"/{Path(html_file_path.stem).name}" 
+                        if Path(html_file_path.stem).name.lower() != 'index' else '/'
+                        
+                        page_info.append({
+                            "name": page_name, 
+                            "path": route_path, 
+                            "displayName": page_name.replace("Page", "")
+                        })
+                    else:
+                        logger.warning(f"Failed to convert page: {page_name}")
+            except Exception as e:
+                logger.error(f"Could not process HTML file {html_file_path}: {e}")
+
+    # Create main layout
+    if shared_components:
+        logger.info("Creating main layout with shared components")
+        layout_imports = "\n".join([f"import {s} from '../components/{s}';" for s in shared_components])
+        layout_render = "\n".join([f"      <{s} />" for s in shared_components])
+        main_layout_content = f"import React from 'react';\nimport {{ Outlet }} from 'react-router-dom';\n{layout_imports}\n\nconst MainLayout = () => {{\n  return (\n    <>\n{layout_render}\n      <main><Outlet /></main>\n    </>\n  );\n}};\n\nexport default MainLayout;\n"
+        save_content(layouts_dir / 'MainLayout.jsx', main_layout_content.encode('utf-8'))
+    else:
+        logger.warning("No shared components found for layout")
+
+    # Create App.js
+    if page_info:
+        logger.info("Creating App.js with routes")
+        app_imports = "import React from 'react';\nimport { BrowserRouter as Router, Routes, Route } from 'react-router-dom';\n"
+        if shared_components:
+            app_imports += "import MainLayout from './layouts/MainLayout';\n"
+        app_imports += "\n".join([f"import {p['name']} from './pages/{p['name']}';" for p in page_info])
+        
+        app_routes = "\n".join([f"        <Route path=\"{p['path']}\" element={{<{p['name']} />}} />" for p in page_info])
+        
+        # Wrap routes in layout if available
+        if shared_components:
+            app_js_content = f"{app_imports}\nimport './index.css';\n\nfunction App() {{\n  return (\n    <Router>\n      <Routes>\n        <Route element={{<MainLayout />}}>\n{app_routes}\n        </Route>\n      </Routes>\n    </Router>\n  );\n}}\n\nexport default App;\n"
+        else:
+            app_js_content = f"{app_imports}\nimport './index.css';\n\nfunction App() {{\n  return (\n    <Router>\n      <Routes>\n{app_routes}\n      </Routes>\n    </Router>\n  );\n}}\n\nexport default App;\n"
+        
+        save_content(src_dir / 'App.js', app_js_content.encode('utf-8'))
+    else:
+        logger.error("No pages created for App.js")
+
+    # Create index.js
     index_js_content = "import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport App from './App';\n\nconst root = ReactDOM.createRoot(document.getElementById('root'));\nroot.render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>\n);"
     save_content(src_dir / 'index.js', index_js_content.encode('utf-8'))
 
-    if (source_dir / "images").exists(): shutil.copytree(source_dir / "images", public_dir / "images")
-    if (source_dir / "assets").exists(): shutil.copytree(source_dir / "assets", public_dir / "assets")
+    # Copy assets
+    logger.info("Copying assets to public directory")
+    if (source_dir / "images").exists(): 
+        shutil.copytree(source_dir / "images", public_dir / "images")
+    if (source_dir / "assets").exists(): 
+        shutil.copytree(source_dir / "assets", public_dir / "assets")
 
-    # --- FIX: Save the zip file to the project root where the view expects it ---
+    # Create zip archive
+    logger.info("Creating final zip archive")
     zip_filename = f"{project_name}.zip"
     zip_path = target_dir.parent / zip_filename
     create_zip_from_directory(target_dir, zip_path)
+    
+    logger.info(f"React conversion complete: {zip_path}")
+    log_memory_usage()
     
     return str(zip_path)
