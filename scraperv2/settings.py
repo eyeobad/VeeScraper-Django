@@ -28,7 +28,7 @@ DEBUG = True
 ALLOWED_HOSTS = ['veescraper.onrender.com', 'localhost','veescraper-django.onrender.com','veescraper-django-1.onrender.com' ]
 
 
-# Application definition
+
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -37,7 +37,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'scraperappv2',  # Your scraper app
+    'scraperappv2',  
 ]
 
 MIDDLEWARE = [
@@ -119,7 +119,10 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
-
+# Use cookie-based sessions instead of database sessions
+SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
+SESSION_COOKIE_SECURE = True  # Requires HTTPS
+SESSION_COOKIE_HTTPONLY = True  # Security recommendation
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
