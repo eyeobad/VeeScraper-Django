@@ -490,8 +490,9 @@ def run_react_conversion_workflow(source_dir_str: str):
                         save_content(pages_dir / f"{page_name}.jsx", component_code.encode('utf-8'))
                         
                         # Create route path
-                        route_path = f"/{Path(html_file_path.stem).name}" 
-                        if Path(html_file_path.stem).name.lower() != 'index' else '/'
+                   
+                        route_path = f"/{Path(html_file_path).stem}" if Path(html_file_path).stem.lower() != 'index' else '/'
+
                         
                         page_info.append({
                             "name": page_name, 
