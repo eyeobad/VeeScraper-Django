@@ -258,7 +258,7 @@ def decompose_html(soup: BeautifulSoup) -> dict:
 
 # --- MAIN WORKFLOW FUNCTIONS ---
 
-
+# FIX: Renamed function to match the import in views.py
 def run_scrape_workflow(base_url: str, depth: int = DEFAULT_MAX_DEPTH, workers: int = DEFAULT_MAX_WORKERS, output: str = None, user_agent: str = DEFAULT_USER_AGENT):
     base_url = base_url.rstrip("/")
     scrape_id = f"{urlparse(base_url).netloc}_{int(time.time())}"
