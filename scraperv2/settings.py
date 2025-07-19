@@ -68,7 +68,8 @@ TEMPLATES = [
 ]
 STATIC_URL = '/static/'
 
-
+# Directory where collectstatic will gather all static files.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 WSGI_APPLICATION = 'scraperv2.wsgi.application'
 
