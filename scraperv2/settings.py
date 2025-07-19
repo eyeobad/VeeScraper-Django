@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-ifo6r!ml%0d=*__0^b5n-2%dt-p&=%bqap5w*a==-+b3h5l6c2
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['veescraper.onrender.com', 'localhost','veescraper-django.onrender.com','veescraper-django-1.onrender.com' ]
+ALLOWED_HOSTS = ['*' ]
 
 
 
